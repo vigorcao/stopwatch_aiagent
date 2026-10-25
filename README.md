@@ -4,7 +4,7 @@
 
 本仓库保存黑豆的 Codex pet 包、贴图、手表固件、Mac 端小助手、烧录工具和技术架构。
 
-**交互演示**：https://vigorc.github.io/heidou-stopwatch-demo/
+**交互演示**：https://vigorcao.github.io/heidou-stopwatch-demo/
 
 ![手表 + Mac + Codex + 黑豆](demo/shots/working.png)
 
@@ -24,7 +24,7 @@
 需要 Python 3 和 Pillow（只用于安装前校验）。
 
 ```bash
-git clone https://github.com/vigorc/stopwatch_aiagent.git
+git clone https://github.com/vigorcao/stopwatch_aiagent.git
 cd stopwatch_aiagent
 scripts/install.sh
 ```
