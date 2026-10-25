@@ -2,3 +2,8 @@
 __pycache__/
 *.pyc
 assets/frames/
+demo/src/core.js
+demo/src/frames.js
+demo/src/out.tmp.html
+demo/src/stopwatch-pet.html
+demo/src/shots/

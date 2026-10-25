@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StopWatch Voice Code</title></head><body>
+<script src="core.js"></script>
+<script src="frames.js"></script>
+<script>
+/* StopWatch + Mac: voice to the desktop agent, status back to the pet (黑豆, the GPT app).
+   Colorfigures engine; Anatomy discipline (truth model first, real parts, live readout).
+   Watch: M5Stack StopWatch, black round case 52.0 x 15.5 mm, orange key and blue key on the top rim, 1.75" 466x466
+   AMOLED under a full-face glass. Scale 2 units per mm. The MacBook is drawn at about 1:4 (1:3 geometry shrunk by MK) so both fit one view.
+   x = depth (screens face +x), y = width (+y = viewer-left), z = up. Desk board from (0,0).
+
+   The loop (from ~/Work/M5Stack: app_voice_code, mac/voicecode.swift, voicecode-hook.sh, ~/.codex/hooks.json):
+   1  hold A        watch mic -> ES8311 -> ESP32-S3 -> 16 kHz IMA-ADPCM (64 kbps) -> BLE audio characteristic
+   2  release A     voicecode helper on the Mac: whisper-server large-v3-turbo -> text typed into the Codex window
+   3  Codex hooks   voicecode-hook.sh <state> gpt -> /tmp/voicecode.sock -> StatusHub -> BLE status characteristic
+   4  watch         state -> 黑豆's clip: Listening waving, Sending running, Thinking review, Working running,
+                    Permission waiting + buzz, Done jumping; B shows the last reply (<= 500 B)  */
+
+const XB = 192, XF = 223, XM = (XB + XF)/2, RW = 52, RCH = 2.5, CY = 66, CZ = 56;
+const OUTW = ellUV(CY, CZ, RW, RW, 48);
+const PCB0 = XB + 16, PCB1 = XB + 19, PANEL0 = XF - 6, PANEL1 = XF - 4, SCR_R = 44.5;
+const TH = { A: 40, B: -40 };                              // keys on the top rim, degrees from +z toward +y
+const KEYM = { A: matOf('#f4a53c'), B: matOf('#3d63d6') };
+PALS.black = { l:'#5d5a56', m:'#3e3b38', d:'#242220' };
+const radial = th => { const a = th*Math.PI/180; return [0, Math.sin(a), Math.cos(a)]; };
+const onRim = (th, r, x = XM) => { const d = radial(th); return [x, CY + r*d[1], CZ + r*d[2]]; };
+const ringX = (x, r, n = 48) => on(PX(x), ellUV(CY, CZ, r, r, n));
+
+/* ---------- truth model ---------- */
+const PIPE = { rate: 16000, bits: 4, kbps: 64, kBps: 8, hb: 10, reply: 500 };
+const SAID = '帮我把计时器到点的提示音改短一点';
+const REPLY = '已把 Timer 到点提示改成三声短响，idf.py build 通过，可以 app-flash 试试。';
+const PH = {
+  idle:   { clip: 'idle',    tag: 'IDLE' },
+  listen: { clip: 'waving',  tag: 'LISTENING', ms: 2400, next: 'send' },
+  send:   { clip: 'running', tag: 'SENDING',   ms: 1300, next: 'think' },
+  think:  { clip: 'review',  tag: 'THINKING',  ms: 1700, next: 'work' },
+  work:   { clip: 'running', tag: 'WORKING',   ms: 3600, next: 'done' },
+  perm:   { clip: 'waiting', tag: 'NEEDS YOU', ms: 3200, next: 'work' },
+  done:   { clip: 'jumping', tag: 'DONE' } };
+const CLIPN = { idle: 6, waving: 4, jumping: 5, failed: 6, waiting: 6, running: 6, review: 6 };
+const FRAME_MS = 150;
+
+/* ---------- helpers ---------- */
+const swW = (pts, col, w = .5) => { const d = pd(pts, false);
+  return `<path d="${d}" fill="none" stroke="${INK}" stroke-width="${f(2*w + .8)}" stroke-linejoin="round" stroke-linecap="round"/><path d="${d}" fill="none" stroke="${col}" stroke-width="${f(2*w)}" stroke-linejoin="round" stroke-linecap="round"/>`; };
+const swBox = pts => [[0,1,2].map(i => Math.min(...pts.map(p => p[i])) - .6), [0,1,2].map(i => Math.max(...pts.map(p => p[i])) + .6)];
+const txB = (x,y,z,str,size,col=INK,weight=700) => `<text transform="${txM(P(x,y,z), Dv(0,1,0), Dv(0,0,-1))}" font-size="${size}" fill="${col}" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="${weight}" letter-spacing=".04em">${str}</text>`;
+function prismX(prof, x0, x1, m, w = .8){
+  const A = on(PX(x0), prof), B = on(PX(x1), prof);
+  let s = loft(A, B, n => toneI(n, m));
+  if (facing([1,0,0])) s += shape(B, toneI([1,0,0], m), w * .7);
+  if (facing([-1,0,0])) s += shape(A, toneI([-1,0,0], m), w * .7);
+  return s + hullInk([...A, ...B], w);
+}
+// a convex box in any frame: centre c, unit axes a/b/r, half sizes ha/hb, radial span r0..r1
+function obox(c, a, b, r, ha, hb, r0, r1, m, w = .9){
+  const pt = (i, j, k) => [0,1,2].map(n => c[n] + a[n]*i*ha + b[n]*j*hb + r[n]*(k ? r1 : r0));
+  const F = [[r, [pt(-1,-1,1), pt(1,-1,1), pt(1,1,1), pt(-1,1,1)]], [r.map(v => -v), [pt(-1,-1,0), pt(1,-1,0), pt(1,1,0), pt(-1,1,0)]],
+    [a, [pt(1,-1,0), pt(1,1,0), pt(1,1,1), pt(1,-1,1)]], [a.map(v => -v), [pt(-1,-1,0), pt(-1,1,0), pt(-1,1,1), pt(-1,-1,1)]],
+    [b, [pt(-1,1,0), pt(1,1,0), pt(1,1,1), pt(-1,1,1)]], [b.map(v => -v), [pt(-1,-1,0), pt(1,-1,0), pt(1,-1,1), pt(-1,-1,1)]]];
+  return F.filter(([n]) => vis(n)).map(([n, q]) => shape(q, toneI(n, m), w)).join('');
+}
+function along(pts, t){ const seg = []; let L0 = 0;
+  for (let i = 1; i < pts.length; i++){ const l = Math.hypot(...sub(pts[i], pts[i-1])); seg.push(l); L0 += l; }
+  let d = Math.max(0, Math.min(1, t)) * L0;
+  for (let i = 0; i < seg.length; i++){ if (d <= seg[i] || i === seg.length - 1){ const k = seg[i] ? d/seg[i] : 0; return pts[i].map((v, j) => v + (pts[i+1][j] - v)*k); } d -= seg[i]; }
+  return pts[pts.length - 1]; }
+// wrap mixed CJK / Latin text by display width (a CJK glyph ~ 1 em, Latin ~ .6 em)
+function wrapW(str, em){ const out = []; let line = '', w = 0;
+  for (const ch of str){ const cw = /[⺀-￿]/.test(ch) ? 1 : .6; if (w + cw > em){ out.push(line); line = ''; w = 0; } line += ch; w += cw; }
+  if (line) out.push(line); return out; }
+const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/* ---------- the watch screen (GPT app: cream background, 黑豆) ---------- */
+const SX = XF + .12;
+const sPt = (u, v, x = SX) => [x, CY - u, CZ + v];
+const sTx = (u, v, str, size, col = INK, w = 800, x = SX + .02) => tx(x, CY - u, CZ + v, esc(str), size, col, w);
+function petUse(st, x, alpha = 1){
+  const ph = PH[st.phase], clip = st.page === 'reply' ? 'idle' : (st.phase === 'done' && st.now - st.t0 > CLIPN.jumping*FRAME_MS ? 'idle' : ph.clip);
+  const i = Math.floor((st.now - (clip === ph.clip ? st.t0 : 0)) / FRAME_MS) % CLIPN[clip];
+  const s = .46, w = 120*s, o = P(...sPt(-w/2, 18, x)), U = Dv(0,-1,0), V = Dv(0,0,-1);
+  return `<use href="#pf_${clip}_${i}" opacity="${f(alpha)}" transform="matrix(${(U[0]*s).toFixed(4)} ${(U[1]*s).toFixed(4)} ${(V[0]*s).toFixed(4)} ${(V[1]*s).toFixed(4)} ${f(o[0])} ${f(o[1])})"/>`;
+}
+const clock = () => { const d = new Date(); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+function screen(st){
+  const disc = ringX(SX, SCR_R, 56);
+  let s = '';
+  if (st.page === 'reply'){
+    s += fill(pd(disc), '#1d1b18') + sTx(0, 30, 'GPT REPLY', 4.2, '#f4a53c');
+    wrapW(REPLY, 13).slice(0, 6).forEach((ln, i) => { s += sTx(0, 19 - i*7.4, ln, 4.4, '#f2efe7', 600); });
+    s += sTx(0, -35, 'B  BACK', 3.4, '#857d6e');
+    return clipTo(disc, s);
+  }
+  s += fill(pd(disc), '#F0ECE2');
+  s += sTx(0, 33, clock(), 6, INK, 700);
+  const busy = st.phase === 'work' ? ` ${st.tool} ${Math.max(1, Math.round((st.now - st.busy0)/1000))}s` : '';
+  let line = `GPT · ${PH[st.phase].tag}${busy}`;
+  if (st.phase === 'listen'){
+    for (let i = 0; i < 9; i++){ const hgt = 1.2 + 4.5*Math.abs(Math.sin(st.now/90 + i*1.7)) * (.5 + .5*Math.sin(i*2.1 + st.now/240)), u = -11 + i*2.6;
+      s += fill(pd(on(PX(SX + .03), rectUV(CY - u - .8, CZ + 24 - hgt/2, CY - u + .8, CZ + 24 + hgt/2))), '#e2483d'); }
+    line = 'HOLD A · TALK';
+  }
+  s += sTx(0, st.phase === 'listen' ? 17 : 24, line, 3.5, INK, 800);
+  s += petUse(st, SX + .04);
+  return clipTo(disc, s);
+}
+
+/* ---------- the watch outside ---------- */
+function caseBody(st, m){
+  const FRONT = facing([1,0,0]), BACK = facing([-1,0,0]);
+  const A0 = ringX(XB, RW - RCH), A1 = ringX(XB + RCH, RW), A2 = ringX(XF - RCH, RW), A3 = ringX(XF, RW - RCH);
+  let s = '';
+  if (BACK){
+    s += fill(pd(A0), tone([-1,0,0], m));
+    s += shape(ringX(XB - .05, 31), mix(tone([-1,0,0], m), '#000000', .15), .8);
+    for (const a of [45, 135, 225, 315]){ const r = 41, y = CY + r*Math.sin(a*Math.PI/180), z = CZ + r*Math.cos(a*Math.PI/180);
+      s += shape(on(PX(XB - .08), ellUV(y, z, 2.2, 2.2, 12)), METAL.d, .6) + line([[XB - .1, y - 1.3, z], [XB - .1, y + 1.3, z]], .5); }
+    for (let i = -2; i <= 2; i++) for (let j = -2; j <= 2; j++) if (i*i + j*j <= 5)
+      s += fill(pd(on(PX(XB - .1), ellUV(CY + 18 + i*3.2, CZ - 30 + j*3.2, .9, .9, 8))), '#0d0d0e');
+    s += txB(XB - .12, CY, CZ + 8, 'M5STACK', 5.2, '#d8d3c6', 800) + txB(XB - .12, CY, CZ, 'StopWatch', 3.6, '#d8d3c6', 700);
+    s += ink(pd(A0), 2.2);
+  }
+  s += loft(A0, A1, n => tone(n, m)) + loft(A1, A2, n => tone(n, m)) + loft(A2, A3, n => tone(n, m));
+  { let seam = ''; for (let i = 0; i < 48; i++){ const a0 = i/48*360, a1 = (i + 1)/48*360; if (facing(radial(a0 + 3.75))) seam += pd([onRim(a0, RW + .05, XB + 9), onRim(a1, RW + .05, XB + 9)], false); }
+    s += `<path d="${seam}" fill="none" stroke="#0d0d0e" stroke-width=".8" opacity=".7"/>`; }
+  if (facing(radial(160))){ const c = onRim(160, RW + .1); s += fill(pd(on(PX(c[0]), ellUV(c[1], c[2], .9, .9, 10))), '#0d0d0e'); }
+  if (FRONT){
+    s += fill(pd(A3), tone([1,0,0], m));
+    s += shape(ringX(XF + .05, 48.4), '#0d0e10', 1);
+    s += screen(st);
+    s += `<path d="${pd(on(PX(XF + .2), arcUV(CY, CZ, 46.5, 115, 158, 10)), false)}" fill="none" stroke="#ffffff" stroke-width="2.2" opacity=".38" stroke-linecap="round"/>`;
+    s += ink(pd(A3), 2.2);
+  }
+  return s + hullInk([...A0, ...A1, ...A2, ...A3], 2.8);
+}
+function keys(st){
+  return Object.entries(TH).map(([k, th]) => {
+    const d = radial(th), t = [0, Math.cos(th*Math.PI/180), -Math.sin(th*Math.PI/180)];
+    const pressed = (k === 'A' && st.phase === 'listen') || (k === 'B' && st.bT > st.now);
+    const svg = act('key' + k, obox(onRim(th, 0, XM - 1), [1,0,0], t, d, 5.5, 8, RW - 2, RW + (pressed ? 2.2 : 4.6), KEYM[k], 1));
+    return { front: facing(d), svg };
+  });
+}
+function rails(){
+  const zr = y => CZ - Math.sqrt(RW*RW - (y - CY)**2);
+  const L = [[CY + 23, 3], [CY + 29, 3], [CY + 29, zr(CY + 29)], [CY + 23, zr(CY + 23)]];
+  const Rr = [[CY - 29, 3], [CY - 23, 3], [CY - 23, zr(CY - 23)], [CY - 29, zr(CY - 29)]];
+  return byDepth([{ box: [[XB + 3, CY + 23, 3], [XF - 3, CY + 29, 13]], svg: prismX(L, XB + 3, XF - 3, WOOD) },
+                  { box: [[XB + 3, CY - 29, 3], [XF - 3, CY - 23, 13]], svg: prismX(Rr, XB + 3, XF - 3, WOOD) }]);
+}
+
+/* ---------- the Mac (1:3): base, keyboard, lid with the helper's Terminal and the Codex window ---------- */
+const MB = { x0: 36, x1: 179, y0: 135, y1: 338, z0: 3, z1: 10.5 };
+const LID = { hx: 42, hz: 10.5, len: 140, t: 3, tilt: 15 };
+const SIN = Math.sin(LID.tilt*Math.PI/180), COS = Math.cos(LID.tilt*Math.PI/180);
+const MK = .78, MA = [179, 135, 3];                     // the Mac is drawn at 1:3 and shrunk about its front-right foot
+const macW = p => p.map((v, i) => MA[i] + MK*(v - MA[i]));
+const macG = svg => { const [ax, ay] = P(...MA); return `<g transform="translate(${f(ax)} ${f(ay)}) scale(${MK}) translate(${f(-ax)} ${f(-ay)})">${svg}</g>`; };
+const ALU = { l:'#e3e4e6', m:'#c2c4c7', d:'#8d9095' };
+const lidPt = (u, v, off = .15) => [LID.hx - (8 + v)*SIN + off*COS, MB.y1 - 6 - u, LID.hz + (8 + v)*COS + off*SIN];   // u right, v up the screen
+const lidTx = (u, v, str, size, col, w = 500, anchor = 'start') => { const o = P(...lidPt(u, v, .25));
+  return `<text transform="${txM(o, Dv(0,-1,0), Dv(SIN,0,-COS))}" font-size="${size}" fill="${col}" text-anchor="${anchor}" font-family="ui-monospace,Menlo,monospace" font-weight="${w}">${esc(str)}</text>`; };
+const lidRect = (u0, v0, u1, v1, col, off = .2) => fill(pd([lidPt(u0, v0, off), lidPt(u1, v0, off), lidPt(u1, v1, off), lidPt(u0, v1, off)]), col);
+function macScreen(st){
+  let s = lidRect(0, 0, 191, 124, '#1f2633', .18);
+  s += lidRect(0, 119, 191, 124, '#e9e7e2') + lidTx(4, 120.3, 'Terminal   Codex', 2.6, '#231e16', 700);
+  // left: the voicecode helper
+  s += lidRect(3, 4, 93, 115, '#15171c') + lidRect(3, 110, 93, 115, '#3a3f4a') + lidTx(48, 111.3, 'voicecode — ~/Work/M5Stack/mac', 2.5, '#d6d3cb', 600, 'middle');
+  st.log.slice(-17).forEach((ln, i) => { s += lidTx(5, 104 - i*5.6, ln.t, 2.75, ln.c || '#c9e4c0', 500); });
+  // right: the Codex window
+  s += lidRect(97, 4, 188, 115, '#f4f2ed') + lidRect(97, 110, 188, 115, '#dcd8cf') + lidTx(142.5, 111.3, 'Codex', 2.8, '#231e16', 700, 'middle');
+  let v = 102;
+  if (st.said){ const ls = wrapW(SAID, 22); s += lidRect(118, v - ls.length*5 - 1.5, 186, v + 3.5, '#231e16');
+    ls.forEach((ln, i) => { s += lidTx(120, v - i*5, ln, 3.2, '#f2efe7', 600); }); v -= ls.length*5 + 8; }
+  if (st.codex){ s += lidTx(100, v, st.codex, 3, '#857d6e', 700); v -= 8; }
+  if (st.reply){ wrapW(REPLY, 26).forEach((ln, i) => { s += lidTx(100, v - i*5, ln, 3.2, '#231e16', 500); }); }
+  s += lidRect(100, 7, 185, 13, '#ffffff') + lidTx(102, 9, st.phase === 'send' ? SAID.slice(0, Math.floor((st.now - st.t0)/60)) : 'Ask Codex…', 2.8, st.phase === 'send' ? '#231e16' : '#a49c8b', 500);
+  return s;
+}
+function mac(st){
+  const parts = [];
+  // base with keyboard well, keys, trackpad
+  { let s = box(MB.x0, MB.y0, MB.z0, MB.x1, MB.y1, MB.z1, ALU, toneI, 1.4);
+    if (facing([0,0,1])){ const z = MB.z1 + .05, kw = on(PZ(z), rrUV(48, 146, 114, 327, 3));
+      s += shape(kw, '#2c2b29', .7);
+      let k = ''; for (let i = 0; i < 6; i++) for (let j = 0; j < 14; j++){ const x = 50 + i*10.6, y = 148 + j*12.8;
+        k += pd(on(PZ(z + .05), rrUV(x, y, x + 8.6, y + 10.8, 1.2, 2))); }
+      s += `<path d="${k}" fill="#46443f" stroke="#1b1a18" stroke-width=".3"/>`;
+      s += shape(on(PZ(z), rrUV(122, 200, 172, 273, 3)), '#d4d6d9', .8);
+      s += line([[MB.x1 - 1, MB.y0 + 90, z], [MB.x1 - 1, MB.y0 + 113, z]], .6); }
+    parts.push({ box: [[MB.x0, MB.y0, MB.z0], [MB.x1, MB.y1, MB.z1]], svg: s }); }
+  // lid: a slab tilted back from the hinge
+  { const F0 = [LID.hx, LID.hz], F1 = [LID.hx - LID.len*SIN, LID.hz + LID.len*COS], nn = [COS, SIN];
+    const prof = [F0, [F0[0] - LID.t*nn[0], F0[1] - LID.t*nn[1]], [F1[0] - LID.t*nn[0], F1[1] - LID.t*nn[1]], F1];
+    const A = prof.map(([x, z]) => [x, MB.y0, z]), B = prof.map(([x, z]) => [x, MB.y1, z]);
+    let s = loft(A, B, n => toneI(n, ALU));
+    if (facing([0,1,0])) s += shape(B, toneI([0,1,0], ALU), .8);
+    if (facing([0,-1,0])) s += shape(A, toneI([0,-1,0], ALU), .8);
+    if (facing([COS, 0, SIN])){
+      s += fill(pd([lidPt(-6, -8, .1), lidPt(197, -8, .1), lidPt(197, 128, .1), lidPt(-6, 128, .1)]), '#16171a');
+      s += macScreen(st); }
+    s += hullInk([...A, ...B], 1.6);
+    parts.push({ box: [[F1[0] - LID.t, MB.y0, MB.z1], [LID.hx + 1, MB.y1, F1[1] + 1]], svg: s }); }
+  return byDepth(parts);
+}
+
+/* ---------- see-through: the watch's insides ---------- */
+const PCBM = matOf('#2f6a55'), CHIP = matOf('#3b3a38'), BATT = matOf('#c3ccd6'), FLEX = matOf('#e2a13e'), CU = '#d9a441';
+const TR = {
+  mic:  [[0, -38], [0, -30], [10, -24], [13, -18]],
+  i2s:  [[13, -12], [13, -4], [8, 2]],
+  rf:   [[12, 12], [16, 22], [19, 28]],
+  disp: [[0, 16], [-4, 26], [-8, 33]],
+  btnA: [[26, 31], [18, 22], [10, 16]],
+  btnB: [[-26, 31], [-14, 20], [0, 16]],
+  amp:  [[16, -15], [20, -18]],
+  pmic: [[-18, -20], [-18, -34], [-3, -44]] };
+const trW = (key, x = PCB1 + .05) => TR[key].map(([y, z]) => [x, CY + y, CZ + z]);
+let MECH_LABELS = '';
+function mech(st, k){
+  const parts = [], put = (b, svg) => parts.push({ box: b, svg });
+  const bx = (x0, y0, z0, x1, y1, z1, m, w = .7) => put([[x0, y0, z0], [x1, y1, z1]], box(x0, y0, z0, x1, y1, z1, m, toneI, w));
+  const on1 = name => st.sig[name] > st.now;
+  for (const [dy, dz] of [[-22, 22], [22, 22], [-22, -22], [22, -22]])
+    put([[XB + 1.5, CY + dy - 5, CZ + dz - 5], [XB + 4, CY + dy + 5, CZ + dz + 5]], cylX(XB + 1.5, XB + 4, CY + dy, CZ + dz, 5, matOf('#9aa3a8'), toneI, .8, 18));
+  { const x0 = XB + 5, x1 = XB + 14; let s = box(x0, CY - 27, CZ - 8, x1, CY + 27, CZ + 30, BATT, toneI, 1);
+    if (facing([1,0,0])) s += tx(x1 + .05, CY, CZ + 14, '450mAh', 6, INK, 800) + tx(x1 + .05, CY, CZ + 7, '3.7V LiPo', 3.4, INK, 600);
+    put([[x0, CY - 27, CZ - 8], [x1, CY + 27, CZ + 30]], s); }
+  { const sp = 1 + (st.chime > st.now ? .06*Math.sin(st.now/25) : 0);
+    put([[XB + 5, CY + 7, CZ - 41], [XB + 12, CY + 29, CZ - 19]], cylX(XB + 5, XB + 12, CY + 18, CZ - 30, 11, DARK, toneI, 1, 24)
+      + (facing([1,0,0]) ? shape(on(PX(XB + 12.05), ellUV(CY + 18, CZ - 30, 6*sp, 6*sp, 16)), METAL.m, .6) : '')); }
+  { const j = st.buzz > st.now ? .7*Math.sin(st.now/12) : 0;
+    put([[XB + 5, CY - 25 + j, CZ - 35], [XB + 9, CY - 11 + j, CZ - 21]], cylX(XB + 5, XB + 9, CY - 18 + j, CZ - 28 + j*.5, 7, METAL, toneI, .9, 20)); }
+  for (const [pts, col] of [
+      [[[XB + 10, CY + 24, CZ + 30], [XB + 13, CY + 28, CZ + 33], [PCB0, CY + 30, CZ + 30]], '#e2483d'],
+      [[[XB + 10, CY + 20, CZ + 30], [XB + 13, CY + 24, CZ + 35], [PCB0, CY + 26, CZ + 33]], '#2b2523'],
+      [[[XB + 12, CY + 24, CZ - 24], [PCB0, CY + 25, CZ - 21]], '#e2483d'],
+      [[[XB + 9, CY - 13, CZ - 24], [PCB0, CY - 11, CZ - 19]], '#e2483d'] ])
+    put(swBox(pts), swW(pts, col, .35));
+  { const prof = ellUV(CY, CZ, 46, 46, 48); let s = `<g opacity=".62">${prismX(prof, PCB0, PCB1, PCBM, 1)}</g>`;
+    if (facing([1,0,0])){
+      const fx = PCB1 + .05;
+      s += fill(pd(on(PX(fx), rectUV(CY + 12, CZ + 28, CY + 28, CZ + 36))), mix(PCBM.l, '#ffffff', .25));
+      const mz = []; for (let i = 0; i <= 7; i++){ const y = CY + 13 + i*2; mz.push([fx + .02, y, CZ + 29], [fx + .02, y, CZ + 35], [fx + .02, y + 1, CZ + 35], [fx + .02, y + 1, CZ + 29]); }
+      const glow = on1('rf');
+      s += `<path d="${pd(mz, false)}" fill="none" stroke="${glow ? '#ffb02e' : CU}" stroke-width="${glow ? 1.1 : .6}" stroke-linejoin="round"/>`;
+      let tr = ''; for (const key in TR) tr += pd(trW(key), false);
+      s += `<path d="${tr}" fill="none" stroke="#5aa585" stroke-width=".7" stroke-linejoin="round" stroke-linecap="round"/>`;
+      let pas = ''; for (const [y0, z0, n] of [[-6, 18, 6], [16, 0, 4], [-28, 0, 5], [4, -34, 5], [-26, -12, 3], [26, 10, 3]])
+        for (let i = 0; i < n; i++){ const y = CY + y0 + i*2.4, z = CZ + z0; pas += shape(on(PX(fx + .03), rectUV(y, z, y + 1.4, z + .8)), i % 2 ? '#c7b07a' : '#3a3632', .25); }
+      s += pas + tx(fx + .03, CY - 20, CZ - 40, 'M5 STOPWATCH', 2.4, '#cfe3d9', 700); }
+    put([[PCB0, CY - 46, CZ - 46], [PCB1, CY + 46, CZ + 46]], s); }
+  const chip = (y0, z0, y1, z1, h, m, label, size = 2) => { const x0 = PCB1, x1 = PCB1 + h;
+    let s = box(x0, CY + y0, CZ + z0, x1, CY + y1, CZ + z1, m, toneI, .7);
+    if (label && facing([1,0,0])) s += tx(x1 + .05, CY + (y0 + y1)/2, CZ + (z0 + z1)/2 - size*.35, label, size, '#e9e4d6', 700);
+    put([[x0, CY + y0, CZ + z0], [x1, CY + y1, CZ + z1]], s); };
+  chip(-2, 2, 12, 16, 1.6, CHIP, 'ESP32-S3', 2.1);
+  chip(-16, 4, -6, 12, 1.4, CHIP, '16MB', 1.8);
+  chip(14, 6, 19, 10, 1.2, METAL, '');
+  chip(10, -18, 16, -12, 1.2, CHIP, 'ES8311', 1.2);
+  chip(20, -20, 24, -16, 1, CHIP, '');
+  chip(-3, -42, 3, -38, 1.4, METAL, '');
+  chip(-14, -8, -9, -3, .9, CHIP, '');
+  chip(-24, 6, -19, 10, .9, CHIP, '');
+  chip(-24, 12, -20, 14, .7, METAL, '');
+  chip(-22, -20, -14, -12, 1.2, CHIP, 'PM1', 1.6);
+  chip(-6, -26, 0, -20, 1, CHIP, 'IOE1', 1.3);
+  bx(PCB0 + .5, CY - 5, CZ - 51, PCB1 + 2.5, CY + 5, CZ - 45, METAL, .8);
+  for (const [key, th] of Object.entries(TH)){ const c = onRim(th, 43.5, PCB1 + 1.2), hit = key === 'A' ? st.phase === 'listen' : st.bT > st.now;
+    bx(PCB1, c[1] - 2.6, c[2] - 2.6, PCB1 + 2.2, c[1] + 2.6, c[2] + 2.6, DARK, .7);
+    const a = onRim(th, 45.5, PCB1 + 1.1), b = onRim(th, RW - 1.6 - (hit ? 1.7 : 0), PCB1 + 1.1);
+    put(swBox([a, b]), rod(a, b, 1, hit ? KEYM[key] : METAL, toneI, .6)); }
+  bx(PCB1, CY - 16, CZ + 33, PCB1 + 1.6, CY + 0, CZ + 37.5, DARK, .7);
+  bx(PCB1 + 1.6, CY - 14.5, CZ + 37.5, PANEL0, CY - 1.5, CZ + 38.4, FLEX, .6);
+  bx(PCB1 + 2.6, CY - 11, CZ + 38.4, PCB1 + 4.4, CY - 6, CZ + 39.2, CHIP, .5);
+  let sig = '';
+  const dots = (key, dir = 1, col = '#ffb02e') => { if (!on1(key)) return;
+    const pts = trW(key, PCB1 + .2); for (let i = 0; i < 3; i++){ let t = ((st.now/700 + i/3) % 1); if (dir < 0) t = 1 - t;
+      const [X, Y] = P(...along(pts, t)); sig += `<circle cx="${f(X)}" cy="${f(Y)}" r="1.25" fill="${col}" stroke="${INK}" stroke-width=".5"/>`; } };
+  dots('mic'); dots('i2s'); dots('rf', st.sigDir.rf); dots('disp'); dots('btnA'); dots('btnB'); dots('amp');
+  if (facing([1,0,0])) put([[PCB1 + .1, CY - 46, CZ - 46], [PCB1 + .2, CY + 46, CZ + 46]], sig);
+  { const A = ringX(PANEL0, 45, 56), B = ringX(PANEL1, 45, 56);
+    let s = `<g opacity=".12">${loft(A, B, n => toneI(n, DARK))}${fill(pd(facing([1,0,0]) ? B : A), '#121316')}</g>`;
+    if (facing([1,0,0])) s += `<g opacity=".28">${clipTo(B, petUse(st, PANEL1 + .05))}</g>`;
+    s += ink(pd(facing([1,0,0]) ? B : A), .9);
+    put([[PANEL0, CY - 45, CZ - 45], [PANEL1, CY + 45, CZ + 45]], s); }
+  const sb = byDepth(parts);
+  MECH_LABELS = k <= .6 ? '' : xrCallouts([
+    { at: [PCB1 + 1.6, CY + 5, CZ + 9], text: 'ESP32-S3R8', on: on1('i2s') || on1('rf') },
+    { at: [PCB1, CY + 20, CZ + 32], text: 'PCB ANTENNA · BLE', on: on1('rf') },
+    { at: [PCB1, CY, CZ - 40], text: 'MEMS MIC', on: on1('mic') },
+    { at: [PCB1 + 1.2, CY + 13, CZ - 15], text: 'ES8311 CODEC', on: on1('mic') || on1('amp') },
+    { at: [XB + 12, CY + 18, CZ - 30], text: 'SPEAKER 1W', on: st.chime > st.now },
+    { at: [XB + 9, CY - 18, CZ - 28], text: 'VIBRATION MOTOR', on: st.buzz > st.now },
+    { at: [XB + 14, CY - 20, CZ + 24], text: 'BATTERY 450mAh', on: false },
+    { at: [PANEL1, CY + 30, CZ + 20], text: 'AMOLED 466x466', on: on1('disp') },
+    { at: onRim(TH.A, 44, PCB1 + 1.2), text: 'SWITCH A', on: st.phase === 'listen' },
+    { at: onRim(TH.B, 44, PCB1 + 1.2), text: 'SWITCH B', on: st.bT > st.now },
+    ], [XB, XF, CY - RW, CY + RW, 0, CZ + RW + 5]);
+  return sb;
+}
+
+/* ---------- radio: packets between the watch antenna and the Mac ---------- */
+const AIR = [[PCB1, CY + 20, CZ + 32], [XB - 20, CY + 60, CZ + 60], macW([LID.hx + 20, 236, 40])];
+function packets(st){
+  let s = '';
+  for (const p of st.pk){ const t = (st.now - p.t0) / 900; if (t < 0 || t > 1) continue;
+    const [X, Y] = P(...along(AIR, p.dir > 0 ? t : 1 - t)), r = 2.4;
+    s += `<rect x="${f(X - r)}" y="${f(Y - r*.7)}" width="${f(2*r)}" height="${f(1.4*r)}" rx=".6" fill="${p.dir > 0 ? '#f4a53c' : '#3d63d6'}" stroke="${INK}" stroke-width=".8" opacity="${f(Math.min(1, 6*(1 - t)) * Math.min(1, 6*t))}"/>`; }
+  return s;
+}
+
+/* ---------- scene ---------- */
+const BRD = [0, 0, 245, 300];
+// Anatomy finish: no hand wobble, thinner precise ink, a soft dark shadow instead of the flat blue one
+const crisp = svg => svg.replace(/stroke-width="([\d.]+)"/g, (_, w) => `stroke-width="${(+w*.6).toFixed(2)}"`)
+  .replace(/fill="#41538f"/g, 'fill="#231e16" fill-opacity=".14"');
+// a ruler strip, corner screws and an engraved plate on the desk board (Anatomy's small precise parts)
+function benchDetail(){
+  const z = 3.06, x1 = BRD[2], y1 = BRD[3];
+  let t = '';
+  for (let y = 10; y <= y1 - 10; y += 5){ const major = (y - 10) % 25 === 0; t += pd([[x1 - 3, y, z], [x1 - (major ? 9 : 6), y, z]], false); }
+  let s = `<path d="${t}" fill="none" stroke="${INK}" stroke-width=".7" opacity=".55"/>`;
+  s += line([[x1 - 3, 10, z], [x1 - 3, y1 - 10, z]], .6);
+  for (const [x, y] of [[8, 8], [x1 - 14, 8], [8, y1 - 8], [x1 - 14, y1 - 8]])
+    s += shape(on(PZ(z), ellUV(x, y, 2.2, 2.2, 14)), METAL.m, .6) + line([[x - 1.3, y, z + .02], [x + 1.3, y, z + .02]], .5);
+  const px0 = x1 - 42, py0 = y1 - 70, px1 = x1 - 16, py1 = y1 - 18;
+  s += shape(on(PZ(z), rrUV(px0, py0, px1, py1, 2)), '#ece6d6', .8);
+  const U = Dv(0,-1,0), V = Dv(1,0,0);
+  const txt = (dv, str, size, w) => { const q = P(px0 + 13 + dv, (py0 + py1)/2, z + .03);
+    return `<text transform="${txM(q, U, V)}" font-size="${size}" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="${w}" fill="${INK}" letter-spacing=".08em">${str}</text>`; };
+  s += txt(-6, 'FIG 05', 5, 800) + txt(1, 'VOICE CODE · STOPWATCH', 2.8, 600) + txt(7, 'WATCH 1:1 · MAC 1:4', 2.6, 500);
+  return s;
+}
+function scene(st, m){
+  const k = ease(st.xr || 0);
+  let s = board(...BRD, 3, 8, WOOD) + benchDetail();
+  const top = boardTop(...BRD, 3, 8);
+  s += castShadow([...ringX(XB, RW, 24), ...ringX(XF, RW, 24)], 3, top);
+  s += castShadow([[MB.x0, MB.y0, 3], [MB.x1, MB.y1, 3], [MB.x0, MB.y1, 3], [MB.x1, MB.y0, 3],
+    [LID.hx - LID.len*SIN, MB.y0, LID.hz + LID.len*COS], [LID.hx - LID.len*SIN, MB.y1, LID.hz + LID.len*COS]].map(macW), 3, top);
+  const ks = keys(st);
+  let body = ks.filter(b => !b.front).map(b => b.svg).join('') + caseBody(st, m) + ks.filter(b => b.front).map(b => b.svg).join('');
+  if (k > 0) body = xrGhost(body, '', k, OUTW, XB, XF, m) + `<g opacity="${f(k)}">${mech(st, k)}</g>`;
+  else MECH_LABELS = '';
+  let watch = rails() + body;
+  const j = st.buzz > st.now ? .45*Math.sin(st.now/11) : 0;
+  if (j) watch = `<g transform="translate(${f(j)},0)">${watch}</g>`;
+  s += byDepth([{ box: [[MB.x0 - 40, MB.y0, 0], [MB.x1, MB.y1, 150]], svg: `<g opacity="${f(1 - .45*k)}">${macG(mac(st))}</g>` },
+                { box: [[XB, CY - RW, 0], [XF, CY + RW, CZ + RW]], svg: watch }]);
+  s += packets(st);
+  if (k > .6) s += MECH_LABELS;
+  else s += tag(onRim(TH.A, RW + 4.6), -30, -48, 'A · HOLD TO TALK', st.phase === 'listen')
+    + tag(onRim(TH.B, RW + 4.6), 40, -40, 'B · REPLY', st.bT > st.now)
+    + tag([XF, CY - 30, CZ - 25], 55, 40, 'WATCH · 黑豆', false)
+    + tag(macW(lidPt(40, 95)), -55, -70, 'VOICECODE HELPER', st.phase === 'send' || st.pk.some(p => st.now - p.t0 < 900))
+    + tag(macW(lidPt(150, 95)), 20, -95, 'CODEX', ['think', 'work', 'perm'].includes(st.phase))
+    + tag(macW([MB.x1, MB.y0 + 150, MB.z1]), -40, 60, 'MAC (1:4)', false);
+  return s;
+}
+
+/* ---------- behaviour ---------- */
+let ui;
+const now = () => performance.now();
+const t0s = () => { const d = new Date(); return `[${[d.getHours(), d.getMinutes(), d.getSeconds()].map(v => String(v).padStart(2, '0')).join(':')}]`; };
+const log = (st, t, c) => st.log.push({ t: `${t0s()} ${t}`, c });
+function pulse(st, keys, ms = 900, dir){ for (const key of keys) st.sig[key] = Math.max(st.sig[key] || 0, st.now + ms); if (dir) st.sigDir.rf = dir; }
+function inbound(st, n = 2){ for (let i = 0; i < n; i++) st.pk.push({ t0: st.now + i*120, dir: -1 }); pulse(st, ['rf', 'disp'], 1000, -1); }
+function enter(st, phase){
+  st.phase = phase; st.t0 = st.now;
+  if (phase === 'listen'){ st.said = false; st.reply = false; st.codex = ''; log(st, 'listening... (gpt, watch mic)'); }
+  if (phase === 'send'){ pulse(st, ['rf'], 400, 1);
+    log(st, `watch mic: ${st.secs.toFixed(1)}s, ${st.npk} packets, 0 lost`);
+    log(st, `  peak 21873, gain x1.0`); }
+  if (phase === 'think'){ st.said = true; log(st, `${SAID.slice(0, 10)}…  (0.8s, gpt)`, '#f2efe7'); log(st, 'watch → thinking', '#9ec5ff');
+    st.codex = 'Thinking…'; inbound(st); st.busy0 = st.now; }
+  if (phase === 'work'){ st.tool = st.tool === 'Bash' ? 'Edit' : 'Bash'; log(st, `watch → working ${st.tool}`, '#9ec5ff'); st.codex = `Running ${st.tool}…`; inbound(st); }
+  if (phase === 'perm'){ log(st, 'watch → permission', '#ffcf7a'); st.codex = 'Approve this command?'; inbound(st); st.buzz = st.now + 900; }
+  if (phase === 'done'){ log(st, `gpt reply → watch (${new TextEncoder().encode(REPLY).length} bytes)`, '#9ec5ff'); st.codex = 'Done';
+    inbound(st, 4); st.reply = true; st.chime = st.now + 700; pulse(st, ['amp'], 700); }
+  st.log = st.log.slice(-17);
+}
+let looping = false;
+function run(){
+  if (looping) return; looping = true;
+  ui.animate(() => {
+    const st = ui.st; st.now = now();
+    const ph = PH[st.phase];
+    if (st.phase === 'listen'){ if (st.now - st.lastPk > 90){ st.lastPk = st.now; st.pk.push({ t0: st.now, dir: 1 }); st.npk++; }
+      st.secs = (st.now - st.t0)/1000; st.kB = st.secs * PIPE.kBps; pulse(st, ['mic', 'i2s', 'rf', 'btnA'], 200, 1); }
+    if (st.phase === 'perm' && st.now - st.t0 > 1300 && st.now - st.t0 < 1400) st.buzz = st.now + 500;
+    if (ph.ms && st.now - st.t0 > ph.ms) enter(st, ph.next);
+    if (st.page === 'reply' && st.now > st.pageEnd) st.page = 'pet';
+    st.pk = st.pk.filter(p => st.now - p.t0 < 1000);
+    const busy = !!ph.ms || st.pk.length || st.buzz > st.now || st.chime > st.now || st.page === 'reply' || Object.values(st.sig).some(v => v > st.now);
+    if (!busy) looping = false;
+    return busy;
+  });
+}
+function talk(st){
+  if (st.phase === 'listen') return ui.flash('正在录音，松开会自动发送');
+  if (st.phase !== 'idle' && st.phase !== 'done') return ui.flash(`Codex 还在 ${PH[st.phase].tag}，等它做完`);
+  st.page = 'pet'; st.now = now(); st.pk = []; st.kB = 0; st.secs = 0; st.npk = 0; st.lastPk = 0; enter(st, 'listen'); run();
+}
+function askPerm(st){
+  if (st.phase !== 'work' && st.phase !== 'think') return ui.flash('先按住 A 说一句，让 Codex 开始干活');
+  st.now = now(); enter(st, 'perm'); run();
+}
+function pressB(st){
+  st.now = now(); st.bT = st.now + 260; pulse(st, ['btnB'], 500);
+  if (st.page === 'reply'){ st.page = 'pet'; run(); return; }
+  if (!st.reply){ run(); return ui.flash('还没有回复：先按住 A 说一句'); }
+  st.page = 'reply'; st.pageEnd = st.now + 5200; pulse(st, ['disp'], 600); run();
+}
+
+ui = mountFigure({
+  fig: '05', turn: 'full', title: 'StopWatch 语音 → Mac → Codex → 黑豆',
+  size: [BRD[2], BRD[3], 150], center: [BRD[2]/2, BRD[3]/2], palette: 'black',
+  state: { phase: 'idle', t0: 0, now: 0, page: 'pet', pageEnd: 0, reply: false, said: false, codex: '', pk: [], lastPk: 0, kB: 0, secs: 0, npk: 0,
+           sig: {}, sigDir: { rf: 1 }, buzz: 0, chime: 0, bT: 0, busy0: 0, tool: 'Edit',
+           log: [{ t: '[14:00:51] whisper-server starting...' }, { t: '[14:00:55] ready — hold A on the watch to talk', c: '#ffcf7a' }] },
+  scene: (st, m) => crisp(scene(st, m)),
+  readout: st => st.phase === 'listen' ? `按住 A · 手表麦克风 ${PIPE.rate/1000} kHz → IMA-ADPCM ${PIPE.bits} bit → 蓝牙 ${PIPE.kbps} kbps · 已发 ${st.kB.toFixed(1)} kB`
+      : st.phase === 'send' ? '松开 A · Mac 上的 voicecode 小助手用 Whisper large-v3-turbo 转文字，把 Codex 窗口提到前台并打字回车'
+      : st.phase === 'think' ? 'Codex hook → voicecode-hook.sh thinking gpt → 小助手经蓝牙写状态 → 黑豆换 review 动画'
+      : st.phase === 'work' ? `Codex 在跑 ${st.tool} → working → 黑豆跑步 · 小助手每 ${PIPE.hb} s 发一次心跳`
+      : st.phase === 'perm' ? 'Codex 要你批准 → permission → 手表震动 + 黑豆 waiting'
+      : st.page === 'reply' ? `B 详情页 · 最后一条回复（去 Markdown，≤ ${PIPE.reply} B）`
+      : st.phase === 'done' ? '完成 → done + 回复正文 → 黑豆跳起来 · 按 B 看回复'
+      : '空闲 · Mac 小助手已连上手表 · 按住 A 说话',
+  stats: st => [{ label: 'state', value: PH[st.phase].tag, small: true }],
+  buttons: [
+    { label: '按住 A 说话', onClick: st => talk(st) },
+    { label: 'Codex 请求权限', onClick: st => askPerm(st) },
+    { label: '按 B 看回复', onClick: st => pressB(st) } ],
+  acts: { keyA: st => talk(st), keyB: st => pressB(st) },
+  params: (st, q) => {
+    st.now = now();
+    if (PH[q.get('phase')]){ const seq = ['listen', 'send', 'think', 'work', 'done'], tgt = q.get('phase');
+      st.npk = 26; st.secs = 2.4; for (const p of seq){ enter(st, p); if (p === tgt) break; }
+      if (tgt === 'perm') enter(st, 'perm'); st.t0 = st.now - 300; st.pk = []; }
+    if (q.get('page') === 'reply'){ st.page = 'reply'; st.pageEnd = st.now + 1e9; st.reply = true; }
+    if (q.has('sig')) for (const key of q.get('sig').split('.')) st.sig[key] = st.now + 1e9;
+  },
+});
+document.getElementById('fdefs').insertAdjacentHTML('beforeend',
+  Object.entries(PET_FR).map(([clip, list]) => list.map((src, i) => `<image id="pf_${clip}_${i}" width="120" height="130" href="${src}"/>`).join('')).join(''));
+document.head.insertAdjacentHTML('beforeend', '<style>#art{filter:none!important}.ctl:has(#wb){display:none!important}body{background-image:none!important}.stage{border:1px solid #cfc7b6;border-radius:14px;background:#f7f4ec;padding:10px 12px 34px}.stage::after{content:"拖动转动 · 按住 A 说话 · See-through 看内部";position:absolute;left:14px;bottom:10px;font-size:11px;letter-spacing:.06em;color:#857d6e}#fig .tag.on rect{fill:#f4a53c!important}#readout{display:block!important;font-size:11.5px;max-width:760px;text-transform:none!important}.idea{display:block!important}</style>');
+const idea = document.createElement('p'); idea.className = 'idea';
+idea.innerHTML = '<strong>原理</strong>手表只负责收音、发蓝牙、显示状态。转文字、打字、跑 Codex 都在 Mac 上；Codex 的 hook 把状态推回手表，黑豆跟着变动作。Mac 按约 1:4 缩小画。';
+document.getElementById('readout').after(idea);
+setInterval(() => { if (!looping){ ui.st.now = now(); ui.render(); } }, FRAME_MS);
+addEventListener('keydown', e => {
+  if (/input|textarea|button/i.test(e.target.tagName)) return;
+  const key = e.key.toLowerCase(), st = ui.st;
+  if (key === 'a' || key === ' ') talk(st); else if (key === 'b') pressB(st); else if (key === 'p') askPerm(st); else return;
+  e.preventDefault(); ui.render();
+});
+xrMount(() => ui, () => '');
+</script></body></html>

@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M5StopWatch Simulator</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --text:#d7dbe3; --dim:#8a92a3; --accent:#6aa9ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif; }
+  header { padding:14px 22px; border-bottom:1px solid var(--line); display:flex; gap:14px; align-items:baseline; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header span { color:var(--dim); font-size:12px; }
+  main { display:grid; grid-template-columns: 560px 1fr; gap:22px; padding:22px; }
+  .stage { display:flex; flex-direction:column; align-items:center; gap:18px; }
+  .watch { position:relative; width:540px; height:540px; border-radius:50%;
+           background:radial-gradient(circle at 35% 30%, #3a3f4a, #1b1e25 70%); box-shadow:0 20px 60px #0008, inset 0 0 0 6px #2b303b; display:grid; place-items:center; }
+  .watch.buzz { animation:buzz .06s linear infinite; }
+  @keyframes buzz { 0%{transform:translate(0,0)} 25%{transform:translate(1.5px,-1px)} 50%{transform:translate(-1.5px,1px)} 75%{transform:translate(1px,1.5px)} }
+  #canvas { width:468px; outline:none; height:466px; border-radius:50%; background:#000; display:block; cursor:pointer; touch-action:none; }
+  .hw { position:absolute; width:26px; height:74px; border-radius:8px; background:#4a505d; border:1px solid #5d6473;
+        color:#e8ebf0; font-weight:700; display:grid; place-items:center; user-select:none; cursor:pointer; }
+  .hw.down { background:var(--accent); color:#0b1320; }
+  #btnA { left:-14px; top:190px; }
+  #btnB { right:-14px; top:190px; }
+  .keys { color:var(--dim); font-size:12px; text-align:center; }
+  kbd { background:#232835; border:1px solid #333a49; border-radius:4px; padding:0 6px; font-size:11px; color:var(--text); }
+  .side { display:flex; flex-direction:column; gap:16px; min-width:0; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  .card h2 { margin:0 0 10px; font-size:13px; color:var(--dim); font-weight:600; letter-spacing:.04em; }
+  .row { display:flex; align-items:center; gap:12px; margin:6px 0; flex-wrap:wrap; }
+  .row label { min-width:70px; color:var(--dim); }
+  button.ctl { background:#232835; color:var(--text); border:1px solid #333a49; border-radius:6px; padding:5px 12px; cursor:pointer; }
+  button.ctl.on { border-color:var(--accent); color:var(--accent); }
+  #tilt { width:150px; height:150px; border-radius:50%; background:#11141a; border:1px solid var(--line); position:relative; cursor:crosshair; touch-action:none; }
+  #tiltDot { position:absolute; width:16px; height:16px; margin:-8px 0 0 -8px; border-radius:50%; background:var(--accent); left:50%; top:50%; }
+  #imuText { font:12px ui-monospace,Menlo,monospace; color:var(--dim); white-space:pre; }
+  #log { height:260px; overflow:auto; font:12px/1.45 ui-monospace,Menlo,monospace; color:#aeb6c5; white-space:pre-wrap; margin:0; }
+  #loading { color:var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1>M5StopWatch Simulator</h1>
+  <span>真实固件应用代码（main/apps）编译为 WebAssembly · 468×466 圆屏</span>
+  <span id="loading">加载中…</span>
+</header>
+<main>
+  <section class="stage">
+    <div class="watch" id="watch">
+      <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+      <div class="hw" id="btnA">A</div>
+      <div class="hw" id="btnB">B</div>
+    </div>
+    <div class="keys">
+      <kbd>A</kbd>/<kbd>←</kbd> 按键 A &nbsp;·&nbsp; <kbd>B</kbd>/<kbd>→</kbd> 按键 B &nbsp;·&nbsp;
+      <kbd>H</kbd> 按住 A+B 回主页 &nbsp;·&nbsp; 鼠标 = 触屏
+    </div>
+  </section>
+
+  <section class="side">
+    <div class="card">
+      <h2>Mac / Claude Code（模拟 Voice Code 蓝牙链路）</h2>
+      <div class="row"><label>蓝牙</label><input type="checkbox" id="vcConn" checked><span style="color:var(--dim)">已连接 "M5 Voice Code"</span></div>
+      <div class="row"><label>听写</label><span id="vcDictation" style="color:var(--dim)">关闭</span></div>
+      <div class="row"><label>来源</label>
+        <select id="vcAgent" style="background:#11141a;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:4px 8px">
+          <option value="claude">Claude Code（Voice Code）</option><option value="gpt">ChatGPT / Codex（GPT · 黑豆）</option><option value="openclaw">OpenClaw（DGX Spark · 煤球）</option>
+        </select></div>
+      <div class="row"><label>Hook 状态</label>
+        <button class="ctl" data-vc="idle">idle</button>
+        <button class="ctl" data-vc="thinking">thinking</button>
+        <button class="ctl" data-vc="working">working</button>
+        <button class="ctl" data-vc="permission">permission</button>
+        <button class="ctl" data-vc="done">done</button>
+        <button class="ctl" data-vc="error">error</button>
+      </div>
+      <div class="row"><label>detail</label><input id="vcDetail" value="Bash" style="background:#11141a;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:4px 8px"></div>
+    </div>
+
+    <div class="card">
+      <h2>音频</h2>
+      <div class="row">
+        <label>麦克风</label>
+        <button class="ctl on" data-mic="tone">测试音</button>
+        <button class="ctl" data-mic="mic">电脑麦克风</button>
+        <button class="ctl" data-mic="off">静音</button>
+      </div>
+      <div class="row"><label>扬声器</label><button class="ctl" id="unmute">点击启用声音</button></div>
+    </div>
+
+    <div class="card">
+      <h2>IMU（拖动小球倾斜手表）</h2>
+      <div class="row">
+        <div id="tilt"><div id="tiltDot"></div></div>
+        <div>
+          <div id="imuText"></div>
+          <div class="row"><button class="ctl" id="shake">摇一摇</button></div>
+          <div class="row"><label>转动</label><input type="range" id="spin" min="-360" max="360" value="0"><span id="spinVal" style="color:var(--dim)">0°/s</span></div>
+          <div style="color:var(--dim);font-size:12px">绕屏幕旋转（松手回零）· 键盘 <kbd>Q</kbd>/<kbd>E</kbd></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>电源</h2>
+      <div class="row"><label>电量</label><input type="range" id="bat" min="0" max="100" value="76"><span id="batVal">76%</span></div>
+      <div class="row"><label>充电</label><input type="checkbox" id="chg"></div>
+      <div class="row"><label>设置</label><button class="ctl" id="resetNvs">清空模拟 NVS 并重启</button></div>
+    </div>
+
+    <div class="card">
+      <h2>串口日志</h2>
+      <pre id="log"></pre>
+    </div>
+  </section>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const logEl = $("log");
+  const ansi = /\x1b\[[0-9;]*m/g;
+  function log(text) {
+    logEl.textContent += text.replace(ansi, "") + "\n";
+    if (logEl.textContent.length > 60000) logEl.textContent = logEl.textContent.slice(-40000);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  /* ----------------------------- audio out ----------------------------- */
+  let ctx = null;
+  function audioCtx() {
+    if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
+    if (ctx.state === "suspended") ctx.resume();
+    return ctx;
+  }
+  $("unmute").onclick = () => { audioCtx(); $("unmute").textContent = "声音已启用"; $("unmute").classList.add("on"); };
+
+  /* ------------------------------ mic in ------------------------------- */
+  // readMic() must deliver PCM at real-time rate like the device's I2S read.
+  let micMode = "tone", micQueue = [], micQueued = 0, genPos = 0, genClock = performance.now();
+  async function startMic() {
+    const c = audioCtx();
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false } });
+    const src = c.createMediaStreamSource(stream);
+    const proc = c.createScriptProcessor(1024, 1, 1);
+    proc.onaudioprocess = (e) => {
+      if (micMode !== "mic") return;
+      const f = e.inputBuffer.getChannelData(0), s = new Int16Array(f.length);
+      for (let i = 0; i < f.length; i++) s[i] = Math.max(-1, Math.min(1, f[i] * 4)) * 32767;
+      micQueue.push(s); micQueued += s.length;
+      while (micQueued > 44100) micQueued -= micQueue.shift().length;
+    };
+    src.connect(proc); proc.connect(c.destination);
+  }
+  function readMic(count) {
+    if (micMode === "mic") {
+      if (micQueued < count) return null;
+      const out = new Int16Array(count); let o = 0;
+      while (o < count) {
+        const head = micQueue[0], take = Math.min(head.length, count - o);
+        out.set(head.subarray(0, take), o); o += take;
+        if (take === head.length) micQueue.shift(); else micQueue[0] = head.subarray(take);
+      }
+      micQueued -= count;
+      return out;
+    }
+    const now = performance.now();
+    const due = (now - genClock) * 44.1;
+    if (due < count) return null;
+    if (due > 44100) genClock = now - count / 44.1;
+    genClock += count / 44.1;
+    const out = new Int16Array(count);
+    if (micMode === "tone") {
+      for (let i = 0; i < count; i++, genPos++) {
+        const t = genPos / 44100, f = 220 * Math.pow(2, 2.5 + 2.5 * Math.sin(t * 0.7));
+        out[i] = (Math.sin(2 * Math.PI * f * t) * 0.5 + Math.sin(2 * Math.PI * f * 2.01 * t) * 0.2 + (Math.random() - 0.5) * 0.02) * 12000;
+      }
+    }
+    return out;
+  }
+  document.querySelectorAll("[data-mic]").forEach((b) => b.onclick = async () => {
+    micMode = b.dataset.mic;
+    document.querySelectorAll("[data-mic]").forEach((x) => x.classList.toggle("on", x === b));
+    if (micMode === "mic") { try { await startMic(); } catch (e) { log("mic error: " + e); } }
+  });
+
+  /* -------------------------------- IMU -------------------------------- */
+  const imu = [0, 0, 1, 0, 0, 0];
+  let shakeUntil = 0;
+  function setTilt(nx, ny) {
+    const r = Math.hypot(nx, ny); if (r > 1) { nx /= r; ny /= r; }
+    $("tiltDot").style.left = (50 + nx * 50) + "%"; $("tiltDot").style.top = (50 + ny * 50) + "%";
+    const ax = Math.sin(nx * Math.PI / 2), ay = Math.sin(ny * Math.PI / 2);
+    imu[0] = ax; imu[1] = -ay; imu[2] = Math.sqrt(Math.max(0, 1 - ax * ax - ay * ay));  // same signs as the board: x points to the low side, y to the high side
+  }
+  let tiltDrag = false;
+  const tiltMove = (e) => { const r = $("tilt").getBoundingClientRect(); setTilt((e.clientX - r.left) / r.width * 2 - 1, (e.clientY - r.top) / r.height * 2 - 1); };
+  $("tilt").onpointerdown = (e) => { tiltDrag = true; $("tilt").setPointerCapture(e.pointerId); tiltMove(e); };
+  $("tilt").onpointermove = (e) => tiltDrag && tiltMove(e);
+  $("tilt").onpointerup = () => { tiltDrag = false; };
+  $("tilt").ondblclick = () => setTilt(0, 0);
+  $("shake").onclick = () => { shakeUntil = performance.now() + 900; };
+  let spinRate = 0;
+  const setSpin = (v) => { spinRate = v; $("spin").value = v; $("spinVal").textContent = v + "°/s"; };
+  $("spin").oninput = () => setSpin(+$("spin").value);
+  $("spin").onpointerup = $("spin").onpointercancel = () => setSpin(0);
+  addEventListener("keydown", (e) => { const k = e.key.toLowerCase(); if ((k === "q" || k === "e") && !e.repeat) setSpin(k === "q" ? -180 : 180); });
+  addEventListener("keyup", (e) => { const k = e.key.toLowerCase(); if (k === "q" || k === "e") setSpin(0); });
+  setInterval(() => {
+    const s = performance.now() < shakeUntil;
+    imu[3] = s ? (Math.random() - 0.5) * 900 : 0; imu[4] = s ? (Math.random() - 0.5) * 900 : 0; imu[5] = s ? (Math.random() - 0.5) * 900 : spinRate;
+    const shown = imu.slice(); if (s) { shown[0] += (Math.random() - 0.5) * 3; shown[1] += (Math.random() - 0.5) * 3; }
+    sim.imu = shown;
+    $("imuText").textContent = `acc  ${shown.slice(0, 3).map((v) => v.toFixed(2).padStart(6)).join(" ")}\ngyro ${shown.slice(3).map((v) => v.toFixed(0).padStart(6)).join(" ")}`;
+  }, 30);
+
+  /* --------------------------- buttons / touch -------------------------- */
+  const sim = {
+    buttons: [false, false, false],
+    touch: { down: false, x: 0, y: 0 },
+    imu: imu.slice(),
+    battery: 76, charging: false,
+    readMic,
+    playPcm(pcm, rate, volume) {
+      if (!ctx || ctx.state !== "running") return;
+      const buf = ctx.createBuffer(1, pcm.length, rate), ch = buf.getChannelData(0);
+      for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+      const src = ctx.createBufferSource(), g = ctx.createGain();
+      g.gain.value = (volume / 100) * 0.8; src.buffer = buf; src.connect(g); g.connect(ctx.destination); src.start();
+    },
+    onBrightness(p) { $("canvas").style.filter = `brightness(${Math.max(0.12, p / 100)})`; },
+    onVibrate(ms) {
+      clearTimeout(sim._vt); $("watch").classList.toggle("buzz", ms > 0);
+      if (ms > 0) sim._vt = setTimeout(() => $("watch").classList.remove("buzz"), ms);
+    },
+    onStatus(t) { log("[sim] " + t); },
+    voice: { connected: true, seq: 0, payload: "idle\t" },
+    onVoiceTalk(pressed, submit, agent) {
+      const ev = (pressed ? "down" : (submit ? "up" : "cancel")) + " → " + agent;
+      $("vcDictation").textContent = pressed ? "🎙 录音中（Mac 小助手）" : (submit ? "转写并发送到 Claude Code" : "已取消");
+      $("vcDictation").style.color = pressed ? "var(--accent)" : "var(--dim)";
+      log("[voice] talk event → Mac helper: " + ev);
+    },
+  };
+  // Firmware polls input every ~33ms: hold each press for at least 80ms so quick
+  // clicks are never missed.
+  const MIN_PRESS_MS = 80, btnDownAt = [0, 0, 0];
+  function setBtn(i, down) {
+    if (down) btnDownAt[i] = performance.now();
+    else {
+      const left = btnDownAt[i] + MIN_PRESS_MS - performance.now();
+      if (left > 0) { setTimeout(() => setBtn(i, false), left); return; }
+    }
+    sim.buttons[i] = down;
+    $("btnA").classList.toggle("down", sim.buttons[0]); $("btnB").classList.toggle("down", sim.buttons[1]);
+    audioCtx();
+  }
+  [["btnA", 0], ["btnB", 1]].forEach(([id, i]) => {
+    const el = $(id);
+    el.onpointerdown = (e) => { el.setPointerCapture(e.pointerId); setBtn(i, true); };
+    el.onpointerup = el.onpointercancel = () => setBtn(i, false);
+  });
+  const keyMap = { a: [0], arrowleft: [0], b: [1], arrowright: [1], h: [0, 1] };
+  addEventListener("keydown", (e) => { const k = keyMap[e.key.toLowerCase()]; if (k && !e.repeat) { k.forEach((i) => setBtn(i, true)); e.preventDefault(); } }, true);
+  addEventListener("keyup", (e) => { const k = keyMap[e.key.toLowerCase()]; if (k) { k.forEach((i) => setBtn(i, false)); e.preventDefault(); } }, true);
+
+  const cv = $("canvas");
+  function touchAt(e) {
+    const r = cv.getBoundingClientRect();
+    sim.touch.x = Math.round((e.clientX - r.left) / r.width * 468);
+    sim.touch.y = Math.round((e.clientY - r.top) / r.height * 466);
+  }
+  let touchDownAt = 0, touchHeld = false;
+  function touchUp() {
+    touchHeld = false;
+    const left = touchDownAt + MIN_PRESS_MS - performance.now();
+    if (left > 0) setTimeout(() => { if (!touchHeld) sim.touch.down = false; }, left);
+    else sim.touch.down = false;
+  }
+  cv.addEventListener("pointerdown", (e) => { cv.setPointerCapture(e.pointerId); touchAt(e); sim.touch.down = touchHeld = true; touchDownAt = performance.now(); audioCtx(); }, true);
+  cv.addEventListener("pointermove", (e) => { if (touchHeld) touchAt(e); }, true);
+  cv.addEventListener("pointerup", touchUp, true);
+  cv.addEventListener("pointercancel", touchUp, true);
+
+  $("vcConn").onchange = () => { sim.voice.connected = $("vcConn").checked; };
+  document.querySelectorAll("[data-vc]").forEach((b) => b.onclick = () => {
+    const st = b.dataset.vc, detail = (st === "working" || st === "permission") ? $("vcDetail").value : "";
+    sim.voice.payload = st + "\t" + detail + "\t" + $("vcAgent").value; sim.voice.seq++;
+    log("[hook] " + sim.voice.payload.replace("\t", " "));
+  });
+  $("bat").oninput = () => { sim.battery = +$("bat").value; $("batVal").textContent = sim.battery + "%"; };
+  $("chg").onchange = () => { sim.charging = $("chg").checked; };
+  $("resetNvs").onclick = () => { Object.keys(localStorage).filter((k) => k.startsWith("m5sw:")).forEach((k) => localStorage.removeItem(k)); location.reload(); };
+
+  var Module = {
+    sim,
+    canvas: cv,
+    print: log,
+    printErr: log,
+    // SDL must not swallow keyboard events meant for the A/B shortcuts.
+    doNotCaptureKeyboard: true,
+    keyboardListeningElement: cv,
+    onRuntimeInitialized() { $("loading").textContent = "运行中"; },
+  };
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

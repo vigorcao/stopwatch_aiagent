@@ -155,4 +155,4 @@ ${CODEX_HOME:-$HOME/.codex}/pets/<pet-id>/
 
 - 本仓库保存**成品和检查记录**，不含当时的 `$imagegen` 提示词和中间条带。生成步骤因此不能按字节重现。
 - `build/pet_request.json` 和 `qa/*.json` 里的本机路径已替换为 `<run>`、`<out>`。
-- 本仓库没有 M5StopWatch 设备端代码。
+- 黑豆在 M5StopWatch 上的加载、固件和烧录见 [stopwatch.md](stopwatch.md)。手表用的是修复版图集 [pet/heidou-repaired/](../pet/heidou-repaired)。
