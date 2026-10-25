@@ -1,0 +1,10 @@
+{
+  "visual_qa": "pass",
+  "reviewed_by": "independent_visual_qa_worker",
+  "qa_note": "All 11 rows retain the same black fuzzy orange-tongued character and match their actions. No visible clipping, interior seam, detached effect, style drift, or size pop. Transparent areas at y=173-190 are natural gaps between the legs.",
+  "review_warnings": [
+    "Continuity outliers at 157.5 to 180 and 270 to 292.5 have no visible size pop.",
+    "Blind axis ambiguity at 157.5, 202.5, 247.5, and 292.5 is resolved by labeled normal-size quadrant review."
+  ],
+  "repair_rows": []
+}

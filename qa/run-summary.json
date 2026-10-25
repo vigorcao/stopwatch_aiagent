@@ -1,0 +1,15 @@
+{
+  "ok": true,
+  "spriteVersionNumber": 2,
+  "run_dir": "<run>",
+  "spritesheet": "<run>/final/spritesheet-extended.webp",
+  "validation": "<run>/final/validation-extended.json",
+  "chroma_despill": "<run>/qa/chroma-despill-extended.json",
+  "contact_sheet": "<run>/qa/contact-sheet-extended.png",
+  "direction_sheet": "<run>/qa/look-directions.png",
+  "direction_semantics": "<run>/qa/direction-semantics.json",
+  "blind_direction_validation": "<run>/qa/direction-blind-validation.json",
+  "continuity": "<run>/qa/look-continuity.json",
+  "review": "<run>/qa/review.json",
+  "package": "~/.codex/pets/heidou"
+}
